@@ -343,3 +343,5 @@ zsdoc/data
 
 # End of https://www.gitignore.io/api/visualstudiocode,pycharm+all,jetbrains+all,virtualenv,python,vim,linux,bash,zsh,shell
 
+auth.json
+
