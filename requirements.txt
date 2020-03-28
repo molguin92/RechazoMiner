@@ -1,3 +1,5 @@
 click
 tweepy
 loguru
+pandas
+pyarrow
