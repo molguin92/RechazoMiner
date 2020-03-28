@@ -42,7 +42,7 @@ class TweetRecord(NamedTuple):
 class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
     def __init__(self, save_path: Path, *args,
                  mode: Literal['append', 'overwrite'] = 'append',
-                 backlog_sz: int = 10, **kwargs):
+                 backlog_sz: int = 100, **kwargs):
         super(AsyncDiskWriteListener, self).__init__(*args, **kwargs)
         self._path = save_path.resolve()
         logger.info('Writing to {}', save_path)
@@ -156,10 +156,13 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
             self.parse_tweet(tweet)
 
     def on_error(self, status_code: int):
-        print(status_code)
+        logger.warning('Got error code from Twitter API: {}', status_code)
         if status_code == 420:
             # returning False in on_error disconnects the stream
+            logger.error('Disconnecting!')
             return False
+
+        logger.warning('Reconnecting, with backoff.')
         return True
         # returning non-False reconnects the stream, with backoff.
 
@@ -169,8 +172,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, catch_signal)
 
     api = setup_API()
-
-    with AsyncDiskWriteListener(Path('/tmp/records')) as listener:
+    with AsyncDiskWriteListener(Path('./tweets.parquet')) as listener:
         stream = tp.Stream(auth=api.auth,
                            listener=listener)
         stream.filter(track=['#rechazo',
