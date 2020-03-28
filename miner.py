@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
@@ -8,8 +9,9 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import List, Literal, NamedTuple
+from typing import List, Literal, NamedTuple, Optional, Tuple
 
+import click
 import pandas as pd
 import tweepy as tp
 from loguru import logger
@@ -167,21 +169,53 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
         # returning non-False reconnects the stream, with backoff.
 
 
-if __name__ == '__main__':
-    # register shutdown
-    signal.signal(signal.SIGINT, catch_signal)
+@click.command()
+@click.argument('save_path', type=click.Path(exists=False,
+                                             file_okay=True,
+                                             dir_okay=False,
+                                             writable=True,
+                                             resolve_path=True))
+@click.argument('track_terms', type=str, nargs=-1)
+@click.option('-m', '--mode',
+              type=click.Choice(['append', 'overwrite'],
+                                case_sensitive=False),
+              default='append', show_default=True)
+@click.option('-b', '--backlog', 'backlog_sz', type=int, default=100,
+              show_default=True)
+@click.option('--location', 'locations', multiple=True,
+              type=click.Tuple(types=[float, float, float, float]))
+@click.option('--language', 'languages', multiple=True,
+              type=str)
+def main(save_path: str,
+         track_terms: Tuple['str'],
+         mode: Literal['append', 'overwrite'] = 'append',
+         backlog_sz: int = 100,
+         locations: Optional[Tuple[Tuple[float]]] = None,
+         languages: Optional[Tuple[str]] = None):
+    if locations is not None:
+        locations = []
+        for loc in locations:
+            locations = locations + list(loc)
 
     api = setup_API()
-    with AsyncDiskWriteListener(Path('./tweets.parquet')) as listener:
+    with AsyncDiskWriteListener(
+            save_path=Path(save_path),
+            mode=mode,
+            backlog_sz=backlog_sz) as listener:
         stream = tp.Stream(auth=api.auth,
                            listener=listener)
-        stream.filter(track=['#rechazo',
-                             '#rechazotuoportunismo',
-                             '#kramermiserable'],
-                      languages=['es'],
-                      locations=[-109.7, -56.7, -66.1, -17.5],
+        stream.filter(track=track_terms,
+                      languages=list(languages),
+                      locations=locations,
                       is_async=True)
 
         while not _shutdown_event.is_set():
             time.sleep(.5)
         stream.disconnect()
+    pass
+
+
+if __name__ == '__main__':
+    # register shutdown
+    signal.signal(signal.SIGINT, catch_signal)
+    main()
