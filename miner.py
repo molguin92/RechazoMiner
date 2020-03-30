@@ -44,7 +44,7 @@ class TweetRecord(NamedTuple):
 class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
     def __init__(self, save_path: Path, *args,
                  mode: Literal['append', 'overwrite'] = 'append',
-                 backlog_sz: int = 100, **kwargs):
+                 backlog_sz: int = 1000, **kwargs):
         super(AsyncDiskWriteListener, self).__init__(*args, **kwargs)
         self._path = save_path.resolve()
         logger.info('Writing to {}', save_path)
@@ -180,7 +180,7 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
               type=click.Choice(['append', 'overwrite'],
                                 case_sensitive=False),
               default='append', show_default=True)
-@click.option('-b', '--backlog', 'backlog_sz', type=int, default=100,
+@click.option('-b', '--backlog', 'backlog_sz', type=int, default=1000,
               show_default=True)
 @click.option('--location', 'locations', multiple=True,
               type=click.Tuple(types=[float, float, float, float]))
@@ -189,7 +189,7 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
 def main(save_path: str,
          track_terms: Tuple['str'],
          mode: Literal['append', 'overwrite'] = 'append',
-         backlog_sz: int = 100,
+         backlog_sz: int = 1000,
          locations: Optional[Tuple[Tuple[float]]] = None,
          languages: Optional[Tuple[str]] = None):
     if locations is not None:
