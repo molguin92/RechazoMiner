@@ -15,6 +15,7 @@ import click
 import pandas as pd
 import tweepy as tp
 from loguru import logger
+from urllib3.exceptions import ProtocolError
 
 _shutdown_event = threading.Event()
 _shutdown_event.clear()
@@ -202,16 +203,21 @@ def main(save_path: str,
             save_path=Path(save_path),
             mode=mode,
             backlog_sz=backlog_sz) as listener:
-        stream = tp.Stream(auth=api.auth,
-                           listener=listener)
-        stream.filter(track=track_terms,
-                      languages=list(languages),
-                      locations=locations,
-                      is_async=True)
+        while True:
+            try:
+                stream = tp.Stream(auth=api.auth,
+                                   listener=listener)
+                stream.filter(track=track_terms,
+                              languages=list(languages),
+                              locations=locations,
+                              is_async=True)
 
-        while not _shutdown_event.is_set():
-            time.sleep(.5)
-        stream.disconnect()
+                while not _shutdown_event.is_set():
+                    time.sleep(.5)
+                stream.disconnect()
+                break
+            except ProtocolError:
+                continue
     pass
 
 
