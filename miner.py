@@ -99,6 +99,7 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
     def __exit__(self, exc_type, exc_value, traceback):
         self.stop()
 
+    # noinspection DuplicatedCode
     @logger.catch
     def _write_loop(self):
         backlog = []
@@ -109,8 +110,9 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
                 if len(backlog) >= self._backlog_sz:
                     # write chunk to disk
                     logger.info('Backlog full - writing data to disk.')
-                    chunk = pd.DataFrame(backlog).set_index('tweet_id',
-                                                            drop=True)
+                    chunk = pd.DataFrame(backlog) \
+                        .drop_duplicates(subset='tweet_id') \
+                        .set_index('tweet_id', drop=True)
                     backlog.clear()
 
                     self._saved_data = pd.concat((self._saved_data, chunk),
@@ -120,8 +122,9 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
                 continue
 
         logger.warning('Writing remaining items in backlog to disk.')
-        chunk = pd.DataFrame(backlog).set_index('tweet_id',
-                                                drop=True)
+        chunk = pd.DataFrame(backlog) \
+            .drop_duplicates(subset='tweet_id') \
+            .set_index('tweet_id', drop=True)
         backlog.clear()
 
         self._saved_data = pd.concat((self._saved_data, chunk),

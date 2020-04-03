@@ -3,3 +3,8 @@ tweepy
 loguru
 pandas
 pyarrow
+editdistance
+matplotlib
+numpy
+wordcloud
+nltk
