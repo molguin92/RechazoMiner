@@ -64,6 +64,12 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
             logger.warning('Path {} already exists.', self._path)
             if mode == 'append':
                 self._saved_data = pd.read_parquet(save_path)
+
+                # fix duplicates
+                self._saved_data = self._saved_data.reset_index() \
+                    .drop_duplicates(subset='tweet_id') \
+                    .set_index('tweet_id')
+
             elif mode == 'overwrite':
                 logger.warning('Setting mode to overwrite!')
                 self._saved_data = pd.DataFrame(columns=TweetRecord._fields) \
