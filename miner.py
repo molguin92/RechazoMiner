@@ -45,7 +45,7 @@ class TweetRecord(NamedTuple):
 class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
     def __init__(self, save_path: Path, *args,
                  mode: Literal['append', 'overwrite'] = 'append',
-                 backlog_sz: int = 1000, **kwargs):
+                 backlog_sz: int = 500, **kwargs):
         super(AsyncDiskWriteListener, self).__init__(*args, **kwargs)
         self._path = save_path.resolve()
         logger.info('Writing to {}', save_path)
@@ -110,9 +110,8 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
     def _write_loop(self):
         backlog = []
         while self._running.is_set():
-            time.sleep(.5)
             try:
-                backlog.append(self._write_q.get(block=False))
+                backlog.append(self._write_q.get(block=True, timeout=0.1))
                 if len(backlog) >= self._backlog_sz:
                     # write chunk to disk
                     logger.info('Backlog full - writing data to disk.')
@@ -190,7 +189,7 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
               type=click.Choice(['append', 'overwrite'],
                                 case_sensitive=False),
               default='append', show_default=True)
-@click.option('-b', '--backlog', 'backlog_sz', type=int, default=1000,
+@click.option('-b', '--backlog', 'backlog_sz', type=int, default=500,
               show_default=True)
 @click.option('--location', 'locations', multiple=True,
               type=click.Tuple(types=[float, float, float, float]))
@@ -208,6 +207,7 @@ def main(save_path: str,
             locations = locations + list(loc)
 
     api = setup_API()
+    logger.warning('Tracking terms: {}', list(track_terms))
     with AsyncDiskWriteListener(
             save_path=Path(save_path),
             mode=mode,
