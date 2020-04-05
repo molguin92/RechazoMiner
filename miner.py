@@ -9,7 +9,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import List, Literal, NamedTuple, Optional, Tuple
+from typing import Collection, List, Literal, NamedTuple, Optional, Tuple
 
 import click
 import pandas as pd
@@ -21,6 +21,7 @@ _shutdown_event = threading.Event()
 _shutdown_event.clear()
 
 
+# noinspection PyUnusedLocal
 def catch_signal(*args, **kwargs):
     logger.warning('Got shutdown signal!')
     _shutdown_event.set()
@@ -40,15 +41,38 @@ class TweetRecord(NamedTuple):
     user_id: int
     date: datetime
     hashtags: List[str]
+    retweets: int
+    likes: int
+    replies: int
+
+
+class UserRecord(NamedTuple):
+    user_id: int
+    name: str
+    screen_name: str
+    location: str
+    url: str
+    verified: bool
+    description: str
+    following: int
+    followers: int
+    tweets: int
+    created: datetime
 
 
 class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
-    def __init__(self, save_path: Path, *args,
+    def __init__(self,
+                 save_path: Path,
+                 *args,
                  mode: Literal['append', 'overwrite'] = 'append',
-                 backlog_sz: int = 500, **kwargs):
+                 backlog_sz: int = 500,
+                 **kwargs):
         super(AsyncDiskWriteListener, self).__init__(*args, **kwargs)
-        self._path = save_path.resolve()
-        logger.info('Writing to {}', save_path)
+        save_path.mkdir(exist_ok=True, parents=True)
+        self._tweet_path = save_path.resolve() / 'tweets.parquet'
+        self._user_path = save_path.resolve() / 'users.parquet'
+        logger.info('Writing tweets to {}', self._tweet_path)
+        logger.info('Writing users to {}', self._user_path)
 
         self._running = threading.Event()
         self._running.clear()
@@ -56,34 +80,35 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
         self._write_q = Queue()
 
         self._write_thread = threading.Thread(
-            target=AsyncDiskWriteListener._write_loop, args=(self,))
+            target=AsyncDiskWriteListener._process_loop, args=(self,))
 
         self._backlog_sz = backlog_sz
-        if self._path.exists():
-            assert not self._path.is_dir()
-            logger.warning('Path {} already exists.', self._path)
-            if mode == 'append':
-                self._saved_data = pd.read_parquet(save_path)
 
-                # fix duplicates
-                self._saved_data = self._saved_data.reset_index() \
-                    .drop_duplicates(subset='tweet_id') \
-                    .set_index('tweet_id')
-
-            elif mode == 'overwrite':
-                logger.warning('Setting mode to overwrite!')
-                self._saved_data = pd.DataFrame(columns=TweetRecord._fields) \
-                    .set_index('tweet_id', drop=True)
-            else:
-                logger.error('Unrecognized mode: {}', mode)
-                raise RuntimeError()
-
-            logger.info('Set mode: {}', mode)
-        else:
-            logger.info('Specified path {} does not exist. Creating it.',
-                        self._path)
-            self._saved_data = pd.DataFrame(columns=TweetRecord._fields) \
+        if mode == 'overwrite':
+            logger.warning('Setting mode to overwrite!')
+            self._saved_tweet_data = pd.DataFrame(columns=TweetRecord._fields) \
                 .set_index('tweet_id', drop=True)
+            self._saved_user_data = pd.DataFrame(columns=UserRecord._fields) \
+                .set_index('user_id', drop=True)
+        elif mode == 'append':
+            if self._tweet_path.exists():
+                assert self._tweet_path.is_file()
+                self._saved_tweet_data = pd.read_parquet(self._tweet_path)
+            else:
+                self._saved_tweet_data = pd.DataFrame(
+                    columns=TweetRecord._fields) \
+                    .set_index('tweet_id', drop=True)
+
+            if self._user_path.exists():
+                assert self._user_path.is_file()
+                self._saved_user_data = pd.read_parquet(self._user_path)
+            else:
+                self._saved_user_data = pd.DataFrame(
+                    columns=UserRecord._fields) \
+                    .set_index('user_id', drop=True)
+
+        else:
+            raise RuntimeError(f'Unrecognized mode: {mode}')
 
     def start(self):
         logger.info('Starting write thread.')
@@ -105,66 +130,112 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
     def __exit__(self, exc_type, exc_value, traceback):
         self.stop()
 
-    # noinspection DuplicatedCode
+    def _write_backlog_to_disk(self,
+                               tweets: Collection[TweetRecord],
+                               users: Collection[UserRecord]) -> None:
+        chunk_tweets = pd.DataFrame(tweets).set_index('tweet_id', drop=True)
+        chunk_users = pd.DataFrame(users).set_index('user_id', drop=True)
+
+        self._saved_tweet_data = pd.concat(
+            objs=(self._saved_tweet_data, chunk_tweets),
+            ignore_index=False) \
+            .reset_index() \
+            .drop_duplicates(subset='tweet_id') \
+            .set_index('tweet_id', verify_integrity=True, drop=True)
+
+        self._saved_tweet_data.to_parquet(str(self._tweet_path))
+
+        self._saved_user_data = pd.concat(
+            objs=(self._saved_user_data, chunk_users),
+            ignore_index=False) \
+            .reset_index() \
+            .drop_duplicates(subset='user_id') \
+            .set_index('user_id', verify_integrity=True, drop=True)
+
+        self._saved_user_data.to_parquet(str(self._user_path))
+
     @logger.catch
-    def _write_loop(self):
-        backlog = []
+    def _process_loop(self):
+        backlog_tweets = {}
+        backlog_users = {}
         while self._running.is_set():
             try:
-                backlog.append(self._write_q.get(block=True, timeout=0.1))
-                if len(backlog) >= self._backlog_sz:
+                tweet, user = AsyncDiskWriteListener. \
+                    _parse_tweet(self._write_q.get(block=True, timeout=0.1))
+
+                backlog_tweets[tweet.tweet_id] = tweet
+                backlog_users[user.user_id] = user
+
+                if max(len(backlog_tweets), len(backlog_users)) >= \
+                        self._backlog_sz:
                     # write chunk to disk
                     logger.info('Backlog full - writing data to disk.')
-                    chunk = pd.DataFrame(backlog) \
-                        .drop_duplicates(subset='tweet_id') \
-                        .set_index('tweet_id', drop=True)
-                    backlog.clear()
-
-                    self._saved_data = pd.concat((self._saved_data, chunk),
-                                                 ignore_index=False)
-                    self._saved_data.to_parquet(str(self._path))
+                    self._write_backlog_to_disk(
+                        tweets=list(backlog_tweets.values()),
+                        users=list(backlog_users.values())
+                    )
+                    backlog_tweets.clear()
+                    backlog_users.clear()
             except Empty:
                 continue
 
-        logger.warning('Writing remaining items in backlog to disk.')
-        chunk = pd.DataFrame(backlog) \
-            .drop_duplicates(subset='tweet_id') \
-            .set_index('tweet_id', drop=True)
-        backlog.clear()
-
-        self._saved_data = pd.concat((self._saved_data, chunk),
-                                     ignore_index=False)
-        self._saved_data.to_parquet(str(self._path))
+        if max(len(backlog_tweets), len(backlog_users)) > 0:
+            logger.warning('Writing remaining items in backlog to disk.')
+            self._write_backlog_to_disk(
+                tweets=list(backlog_tweets.values()),
+                users=list(backlog_users.values())
+            )
+            backlog_tweets.clear()
+            backlog_users.clear()
         logger.info('Exiting write loop.')
 
-    def parse_tweet(self, tweet: tp.Status):
-        tweet_id = int(tweet.id_str)
-        if hasattr(tweet, 'extended_tweet'):
-            text = tweet.extended_tweet['full_text']
-        else:
-            text = tweet.text
+    @staticmethod
+    def _parse_tweet(tweet: tp.Status) -> Tuple[TweetRecord, UserRecord]:
+        user = tweet.user
+        tweet_r = TweetRecord(
+            tweet_id=tweet.id,
+            full_text=(tweet.extended_tweet['full_text']
+                       if hasattr(tweet, 'extended_tweet') else tweet.text),
+            user_id=user.id,
+            date=tweet.created_at,
+            hashtags=[h['text'] for h in tweet.entities.get('hashtags', [])],
+            retweets=tweet.retweet_count,
+            likes=tweet.favorite_count,
+            replies=tweet.reply_count
+        )
 
-        hashtags = [h['text'] for h in tweet.entities.get('hashtags', [])]
+        user_r = UserRecord(
+            user_id=user.id,
+            name=user.name,
+            screen_name=user.screen_name,
+            location=user.location if hasattr(user, 'location') else None,
+            url=user.url if hasattr(user, 'url') else None,
+            verified=user.verified,
+            description=(user.description
+                         if hasattr(user, 'description') else None),
+            following=user.friends_count,
+            followers=user.followers_count,
+            tweets=user.statuses_count,
+            created=user.created_at
+        )
 
-        logger.info('Got tweet: {}', tweet_id)
-        logger.info('Tweet preview: {}', text[:80])
-        if len(hashtags) > 0:
-            logger.info('Hashtags: {}', hashtags)
+        logger.info('Got tweet: {}', tweet_r.tweet_id)
+        logger.info('By user: {}', user_r.screen_name)
+        logger.info('Tweet preview: {}', tweet_r.full_text[:80])
+        if len(tweet_r.hashtags) > 0:
+            logger.info('Hashtags: {}', tweet_r.hashtags)
 
-        self._write_q.put(TweetRecord(tweet_id,
-                                      text,
-                                      int(tweet.user.id_str),
-                                      tweet.created_at,
-                                      hashtags))
+        return tweet_r, user_r
 
     def on_status(self, tweet: tp.Status):
+        # just put it in the queue
         if hasattr(tweet, 'retweeted_status'):
-            self.parse_tweet(tweet.retweeted_status)
+            self._write_q.put(tweet.retweeted_status)
         elif hasattr(tweet, 'quoted_status'):
-            self.parse_tweet(tweet)
-            self.parse_tweet(tweet.quoted_status)
+            self._write_q.put(tweet)
+            self._write_q.put(tweet.quoted_status)
         else:
-            self.parse_tweet(tweet)
+            self._write_q.put(tweet)
 
     def on_error(self, status_code: int):
         logger.warning('Got error code from Twitter API: {}', status_code)
@@ -180,8 +251,8 @@ class AsyncDiskWriteListener(AbstractContextManager, tp.StreamListener):
 
 @click.command()
 @click.argument('save_path', type=click.Path(exists=False,
-                                             file_okay=True,
-                                             dir_okay=False,
+                                             file_okay=False,
+                                             dir_okay=True,
                                              writable=True,
                                              resolve_path=True))
 @click.argument('track_terms', type=str, nargs=-1)
@@ -232,5 +303,6 @@ def main(save_path: str,
 
 if __name__ == '__main__':
     # register shutdown
+    # noinspection PyTypeChecker
     signal.signal(signal.SIGINT, catch_signal)
     main()
